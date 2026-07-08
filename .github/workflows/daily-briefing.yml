@@ -4,6 +4,7 @@ on:
   schedule:
     # GitHub Actions는 UTC 기준 → 한국 아침 7시 = UTC 22:00 (전날)
     - cron: "0 22 * * *"
+    - cron: "20 22 * * *"
   # Actions 탭에서 수동 실행(테스트)도 가능하게
   workflow_dispatch:
 
