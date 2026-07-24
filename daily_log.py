@@ -11,8 +11,7 @@ IMPORTANT (lookahead-bias guard):
     This script records T-day information ONLY. It never computes returns.
     Foreign net-purchase data is finalized after the close, so any signal
     derived from it can only be acted on from T+1 onward. Return evaluation
-    is done separately in evaluate.py, which reads this log and measures
-    T+1 / T+5 / T+20 performance.
+    is done separately in evaluate.py, which measures T+1 / T+5 / T+20.
 
 Output: data/predictions.csv (append-only, idempotent per (date, ticker))
 """
@@ -21,7 +20,7 @@ from __future__ import annotations
 
 import os
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pandas as pd
@@ -33,8 +32,11 @@ from pykrx import stock
 TOP_N = 20                    # how many top net-bought stocks to record each day
 MARKET = "KOSPI"              # "KOSPI" | "KOSDAQ" | "ALL"
 KOSPI_INDEX_TICKER = "1001"   # KRX index code for KOSPI composite
+LOOKBACK_DAYS = 10            # how far back to search for the last trading day
 DATA_DIR = Path(__file__).resolve().parent / "data"
 OUT_PATH = DATA_DIR / "predictions.csv"
+
+KST = timezone(timedelta(hours=9))   # Actions runs in UTC; KRX trades in KST
 
 COLUMNS = [
     "date",             # T (trading day, YYYYMMDD)
@@ -52,30 +54,49 @@ COLUMNS = [
 # ----------------------------------------------------------------------------
 # Helpers
 # ----------------------------------------------------------------------------
-def resolve_trading_day(today: str | None = None) -> str | None:
-    """Return the trading day to log, or None if today is not a trading day.
+def today_kst() -> str:
+    """Today's date in Korea, regardless of the runner's timezone."""
+    return datetime.now(KST).strftime("%Y%m%d")
 
-    We only log on actual trading days. If run on a weekend/holiday, exit
-    quietly rather than duplicating the previous session.
+
+def resolve_trading_day(requested: str | None = None) -> str | None:
+    """Find the most recent day that actually has market data.
+
+    We deliberately avoid pykrx's get_nearest_business_day_in_a_week(),
+    which scrapes KRX directly and intermittently returns nothing.
+    Instead we probe real OHLCV data and walk backwards until we hit a
+    day with rows — this doubles as a data-availability check.
     """
-    today = today or datetime.now().strftime("%Y%m%d")
-    nearest = stock.get_nearest_business_day_in_a_week(date=today, prev=True)
-    if nearest != today:
-        print(f"[skip] {today} is not a trading day (nearest: {nearest})")
-        return None
-    return today
+    start = requested or today_kst()
+    cursor = datetime.strptime(start, "%Y%m%d")
+
+    for _ in range(LOOKBACK_DAYS):
+        candidate = cursor.strftime("%Y%m%d")
+        try:
+            ohlcv = stock.get_market_ohlcv(candidate, market=MARKET)
+        except Exception as exc:
+            print(f"[warn] probe failed for {candidate}: {exc}")
+            ohlcv = None
+
+        if ohlcv is not None and not ohlcv.empty:
+            if candidate != start:
+                print(f"[info] {start} has no data; using {candidate}")
+            return candidate
+
+        cursor -= timedelta(days=1)
+
+    print(f"[skip] no trading data in the {LOOKBACK_DAYS} days before {start}")
+    return None
 
 
 def fetch_foreign_net_buy(date: str) -> pd.DataFrame:
     """Top-N stocks by foreign investor net purchase VALUE on `date`."""
-    df = stock.get_market_net_purchases_of_equities(
-        date, date, MARKET, "외국인"
-    )
+    df = stock.get_market_net_purchases_of_equities(date, date, MARKET, "외국인")
     if df is None or df.empty:
         return pd.DataFrame()
 
     df = df.reset_index()
-    # pykrx returns the ticker either as the index name or a '티커' column
+    # pykrx exposes the ticker as either a '티커' column or the former index
     ticker_col = "티커" if "티커" in df.columns else df.columns[0]
     df = df.rename(
         columns={
@@ -98,7 +119,11 @@ def fetch_closes(date: str) -> pd.Series:
 
 def fetch_kospi_close(date: str) -> float | None:
     """KOSPI composite index close on `date` (benchmark)."""
-    idx = stock.get_index_ohlcv(date, date, KOSPI_INDEX_TICKER)
+    try:
+        idx = stock.get_index_ohlcv(date, date, KOSPI_INDEX_TICKER)
+    except Exception as exc:
+        print(f"[warn] KOSPI index fetch failed: {exc}")
+        return None
     if idx is None or idx.empty:
         return None
     return float(idx["종가"].iloc[0])
@@ -114,9 +139,9 @@ def fetch_news_counts(names: list[str], date: str) -> dict[str, int | None]:
     if not (client_id and client_secret):
         return {n: None for n in names}
 
+    import json
     import urllib.parse
     import urllib.request
-    import json
 
     counts: dict[str, int | None] = {}
     for name in names:
@@ -160,10 +185,7 @@ def append_idempotent(new_rows: pd.DataFrame, path: Path) -> int:
     if path.exists():
         existing = pd.read_csv(path, dtype={"date": str, "ticker": str})
         combined = pd.concat([existing, new_rows], ignore_index=True)
-        # keep the newest write for any duplicated (date, ticker)
-        combined = combined.drop_duplicates(
-            subset=["date", "ticker"], keep="last"
-        )
+        combined = combined.drop_duplicates(subset=["date", "ticker"], keep="last")
     else:
         combined = new_rows
 
@@ -181,7 +203,7 @@ def append_idempotent(new_rows: pd.DataFrame, path: Path) -> int:
 # Main
 # ----------------------------------------------------------------------------
 def main() -> int:
-    # allow manual backfill: python daily_log.py 20260722
+    # manual backfill: python daily_log.py 20260722
     override = sys.argv[1] if len(sys.argv) > 1 else None
     date = resolve_trading_day(override)
     if date is None:
@@ -196,14 +218,13 @@ def main() -> int:
 
     closes = fetch_closes(date)
     flows["close"] = flows["ticker"].map(closes)
-
     flows["kospi_close"] = fetch_kospi_close(date)
 
     news = fetch_news_counts(flows["name"].tolist(), date)
     flows["news_count"] = flows["name"].map(news)
 
     flows["date"] = date
-    flows["logged_at"] = datetime.now().isoformat(timespec="seconds")
+    flows["logged_at"] = datetime.now(KST).isoformat(timespec="seconds")
 
     rows = flows[COLUMNS]
     written = append_idempotent(rows, OUT_PATH)
