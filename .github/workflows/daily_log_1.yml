@@ -1,0 +1,67 @@
+# .github/workflows/daily_log.yml
+#
+# Runs daily_log.py after the Korean market close and commits the updated
+# predictions.csv back to the repository.
+#
+# Triggers:
+#   - schedule            : native cron (unreliable on some repos)
+#   - workflow_dispatch   : manual "Run workflow" button
+#   - repository_dispatch : external trigger (cron-job.org, etc.)
+
+name: daily-log
+
+on:
+  schedule:
+    # KST 16:30 = UTC 07:30 (KRX closes 15:30 KST; allow settle time)
+    - cron: "30 7 * * 1-5"
+  workflow_dispatch:
+  repository_dispatch:
+    types: [daily-log]
+
+permissions:
+  contents: write   # required to push the updated CSV
+
+concurrency:
+  group: daily-log
+  cancel-in-progress: false
+
+jobs:
+  log:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pykrx pandas
+
+      - name: Run daily log
+        env:
+          NAVER_CLIENT_ID: ${{ secrets.NAVER_CLIENT_ID }}
+          NAVER_CLIENT_SECRET: ${{ secrets.NAVER_CLIENT_SECRET }}
+        run: python daily_log.py
+
+      - name: Commit updated log
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          if git diff --quiet -- data/predictions.csv; then
+            echo "no changes (holiday or already logged)"
+            exit 0
+          fi
+
+          git add data/predictions.csv
+          git commit -m "log: $(date -u +%Y-%m-%d) foreign net-buy snapshot"
+
+          # retry once in case another run pushed in between
+          git pull --rebase --autostash origin ${{ github.ref_name }} || true
+          git push
