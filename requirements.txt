@@ -1,2 +1,2 @@
-pykrx
+pykrx>=1.2.8
 requests
