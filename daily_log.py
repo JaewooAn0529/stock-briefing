@@ -26,6 +26,11 @@ from pathlib import Path
 import pandas as pd
 from pykrx import stock
 
+# --- 임시 진단 (원인 확인 후 삭제) ---
+print(f"[debug] KRX_ID length={len(os.environ.get('KRX_ID',''))}, first2={os.environ.get('KRX_ID','')[:2]!r}")
+print(f"[debug] KRX_PW length={len(os.environ.get('KRX_PW',''))}, last={os.environ.get('KRX_PW','')[-1:]!r}")
+# --- 여기까지 ---
+
 # ----------------------------------------------------------------------------
 # Config
 # ----------------------------------------------------------------------------
