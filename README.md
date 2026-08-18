@@ -1,55 +1,44 @@
-# 📊 매일 아침 7시 주식 브리핑 → 카카오톡 자동 발송
+Daily 7 AM Stock Briefing → Auto-sent to KakaoTalk
 
-컴퓨터가 꺼져 있어도 GitHub Actions(클라우드)가 매일 아침 7시(KST)에
-삼성전자·SK하이닉스의 **전일 종가 + 오늘자 뉴스**를 내 카카오톡("나와의 채팅")으로 보냅니다.
+Even with your computer turned off, GitHub Actions (cloud) sends the previous day's closing prices for Samsung Electronics and SK Hynix, plus today's news, to your KakaoTalk ("Chat to Yourself") every morning at 7:00 AM KST.
 
-## 파일 구성
-
-| 파일 | 역할 |
-|---|---|
-| `briefing.py` | 종가(pykrx) + 오늘 뉴스(네이버) 수집 → 카카오 발송 |
-| `.github/workflows/daily-briefing.yml` | 매일 07:00 KST 자동 실행 예약 |
-| `requirements.txt` | 필요 라이브러리 |
-| `get_kakao_token.py` | (최초 1회) 카카오 refresh token 발급 도우미 |
-
-## 설정 순서
-
-### 1. 카카오 refresh token 발급 (최초 1회, 내 컴퓨터에서)
-1. [developers.kakao.com](https://developers.kakao.com) → 앱 생성 → **REST API 키** 확인
-2. 카카오 로그인 ON + Redirect URI에 `https://localhost` 등록
-3. 동의항목에서 **카카오톡 메시지 전송** 켜기
-4. 터미널에서:
-   ```bash
+File Structure
+File	Role
+briefing.py	Fetches closing prices (pykrx) + today's news (Naver) → sends via Kakao
+.github/workflows/daily-briefing.yml	Scheduled to run automatically every day at 07:00 KST
+requirements.txt	Required libraries
+get_kakao_token.py	(One-time) Helper script to issue a Kakao refresh token
+Setup Steps
+1. Issue a Kakao refresh token (one-time, on your own computer)
+Go to developers.kakao.com → create an app → check your REST API key
+Turn Kakao Login ON + register https://localhost as a Redirect URI
+In the consent items, enable Send KakaoTalk Message
+In terminal:
    pip install requests
    python get_kakao_token.py
-   ```
-   안내에 따라 진행하면 `refresh_token`이 출력됩니다. 복사해 두세요.
 
-### 2. GitHub 저장소 만들기
-1. [github.com](https://github.com) 가입 → New repository (**Private** 권장)
-2. 이 폴더의 파일 전체를 업로드
-   - 웹에서: "uploading an existing file" 클릭 후 드래그
-   - `.github/workflows/daily-briefing.yml` 경로가 유지되어야 합니다
+Follow the prompts, and a refresh_token will be printed. Save it.
 
-### 3. Secrets 등록 (비밀값 4개)
-저장소 → Settings → Secrets and variables → **Actions** → New repository secret
+2. Create a GitHub repository
+Sign up at github.com → New repository (Private recommended)
+Upload all files in this folder
+On the web: click "uploading an existing file" and drag the files in
+The .github/workflows/daily-briefing.yml path must be preserved
+3. Register Secrets (4 values)
 
-| 이름 | 값 |
-|---|---|
-| `NAVER_CLIENT_ID` | 네이버 개발자센터 Client ID |
-| `NAVER_CLIENT_SECRET` | 네이버 개발자센터 Client Secret |
-| `KAKAO_REST_API_KEY` | 카카오 REST API 키 |
-| `KAKAO_REFRESH_TOKEN` | 1단계에서 발급한 refresh token |
+Repository → Settings → Secrets and variables → Actions → New repository secret
 
-### 4. 테스트
-저장소 → **Actions** 탭 → `daily-stock-briefing` → **Run workflow** 버튼으로 수동 실행.
-카카오톡 "나와의 채팅"에 메시지가 오면 성공! 이후 매일 아침 7시에 자동 발송됩니다.
+Name	Value
+NAVER_CLIENT_ID	Naver Developers Client ID
+NAVER_CLIENT_SECRET	Naver Developers Client Secret
+KAKAO_REST_API_KEY	Kakao REST API key
+KAKAO_REFRESH_TOKEN	The refresh token issued in Step 1
+4. Test
 
-## 참고사항
-- **시간**: GitHub Actions는 UTC 기준이라 `cron: "0 22 * * *"` = 한국 아침 7시.
-  부하에 따라 몇 분~수십 분 지연될 수 있습니다(무료 서비스 특성).
-- **주말/휴장일**: 장이 없던 날도 "최근 영업일 종가"로 발송됩니다.
-- **refresh token 만료**: 약 2개월. 만료로 발송이 멈추면 `get_kakao_token.py`를
-  다시 실행해 새 토큰을 Secrets에 갱신하세요.
-- **뉴스가 없는 날**: 아침 7시 기준 "오늘" 발행 기사가 아직 없으면
-  가격 메시지만 발송될 수 있습니다.
+Repository → Actions tab → daily-stock-briefing → click Run workflow to trigger it manually. If a message arrives in your KakaoTalk "Chat to Yourself," it's working! From then on, it will send automatically every morning at 7 AM.
+
+Notes
+Timing: GitHub Actions runs on UTC, so cron: "0 22 * * *" corresponds to 7 AM in Korea. Since this is a free service, actual runs may lag by a few minutes to tens of minutes depending on load.
+Weekends/market holidays: On days when the market is closed, the briefing is sent using the "most recent trading day's closing price."
+Refresh token expiration: Roughly 2 months. If the briefing stops arriving due to expiration, re-run get_kakao_token.py and update the new token in Secrets.
+Days with no news: If no articles were published "today" as of 7 AM, only the price message may be sent.
