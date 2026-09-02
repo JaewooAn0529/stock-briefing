@@ -116,10 +116,30 @@ def detect_upstream_errors():
     for line in captured.splitlines():
         if "로그인 ID" in line:
             continue
+        # "Error occurred in ..."은 아래에서 예외 메시지로 그대로 올라간다.
+        # 여기서도 찍으면, 호출자가 "아직 데이터 없음"으로 정상 처리한 경우에도
+        # 로그에 에러가 남아 진짜 고장처럼 보인다.
+        if "Error occurred in" in line:
+            continue
         if line.strip():
             print(line, file=sys.stdout)
     if "Error occurred in" in captured:
         raise UpstreamFetchError(captured.strip())
+
+
+# pykrx가 "빈 결과"를 내면서 남기는 흔적. 빈 DataFrame에 컬럼명 8개를 붙이려다
+# 나는 오류라서 문구가 이렇게 생겼다:
+#   Length mismatch: Expected axis has 0 elements, new values have 8 elements
+# 이건 응답 실패가 아니라 **그날 데이터가 아직 없다**는 뜻이다. 장중이나 마감
+# 직후(정산 전)에 오늘 날짜로 조회하면 이 상태가 된다 — 실측 확인: 10:57 KST에
+# 20260902는 이 오류, 20260901은 893행 정상.
+# 휴장일과 같게 취급해서 전 거래일로 내려가야 하며, 진짜 응답 실패(로그인 끊김
+# 등, "Expecting value: line 1 column 1")와는 반드시 구분해야 한다.
+_NO_DATA_SIGNATURES = ("Expected axis has 0 elements",)
+
+
+def is_no_data_error(exc: BaseException) -> bool:
+    return any(sig in str(exc) for sig in _NO_DATA_SIGNATURES)
 
 
 def import_pykrx_stock():
@@ -157,8 +177,13 @@ def fetch_day_krx(date: str, market: str = "KOSPI", top_n: int | None = 20) -> p
 
     stock = import_pykrx_stock()
 
-    with detect_upstream_errors():
-        flow = stock.get_market_net_purchases_of_equities_by_ticker(date, date, market, "외국인")
+    try:
+        with detect_upstream_errors():
+            flow = stock.get_market_net_purchases_of_equities_by_ticker(date, date, market, "외국인")
+    except UpstreamFetchError as exc:
+        if is_no_data_error(exc):
+            return None  # 휴장일이거나 아직 공표 전 — 호출자가 전 거래일로 내려간다
+        raise
     if flow is None or flow.empty:
         return None  # 에러 없이 비었다 = 진짜 휴장일
 
@@ -262,6 +287,16 @@ def resolve_trading_day(source: str, start: str, market: str = "KOSPI", lookback
     return None
 
 
+def _content_signature(df: pd.DataFrame) -> pd.Series:
+    """logged_at을 뺀 실제 내용의 행별 지문.
+
+    CSV에서 읽은 결측은 NaN, 새로 만든 행은 pd.NA라서 그냥 astype(str)로
+    비교하면 'nan' vs '<NA>'로 갈린다. 빈 문자열로 맞춘 뒤 비교한다.
+    """
+    cols = [c for c in COLUMNS if c != "logged_at"]
+    return df[cols].fillna("").astype(str).agg("|".join, axis=1)
+
+
 def append_idempotent(new_rows: pd.DataFrame, path: Path = OUT_PATH) -> pd.DataFrame:
     """(date, ticker) 기준으로 덮어쓰며 append. 크래시로 파일이 깨지지 않게 원자적으로 쓴다."""
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -273,6 +308,14 @@ def append_idempotent(new_rows: pd.DataFrame, path: Path = OUT_PATH) -> pd.DataF
         existing["date"] = existing["date"].map(
             lambda s: to_iso(s) if isinstance(s, str) and len(s) == 8 and s.isdigit() else s
         )
+        # 내용이 똑같은 행은 새로 쓰지 않는다. logged_at만 갱신하면 파일은
+        # 매번 바뀌고, launchd가 하루 두 번 도는 탓에 "20 insertions, 20
+        # deletions"짜리 의미 없는 커밋이 매일 쌓인다. 진짜 데이터가 바뀐
+        # 날만 diff에 남아야 나중에 이력을 읽을 수 있다.
+        unchanged = _content_signature(existing)
+        keep_mask = ~_content_signature(new_rows).isin(set(unchanged))
+        new_rows = new_rows[keep_mask]
+
         combined = pd.concat([existing, new_rows], ignore_index=True)
         combined = combined.drop_duplicates(subset=["date", "ticker"], keep="last")
     else:
