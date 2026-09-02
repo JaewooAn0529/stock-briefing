@@ -1,0 +1,98 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  설치:
+    cp scripts/com.jaewoo.stockbriefing.dailylog.plist ~/Library/LaunchAgents/
+    launchctl unload ~/Library/LaunchAgents/com.jaewoo.stockbriefing.dailylog.plist 2>/dev/null
+    launchctl load  ~/Library/LaunchAgents/com.jaewoo.stockbriefing.dailylog.plist
+
+  즉시 한 번 돌려보기:
+    launchctl start com.jaewoo.stockbriefing.dailylog
+
+  제거:
+    launchctl unload ~/Library/LaunchAgents/com.jaewoo.stockbriefing.dailylog.plist
+
+  시각 주의:
+    StartCalendarInterval은 "맥의 로컬 시각" 기준이다. 이 맥은 현재 UTC+8이라
+    KST보다 1시간 느리므로, 로컬 16:00 = KST 17:00 이다(KRX 마감 15:30 KST 이후).
+    다만 daily_log.py는 한국 기준 오늘부터 거꾸로 훑어 데이터가 있는 마지막
+    거래일을 찾고, 같은 날 재실행은 멱등하다. 그래서 타임존이 바뀌거나 맥이
+    자고 있어 한 번 걸러도 그날 안에 만회되도록 하루 두 번 걸어둔다.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.jaewoo.stockbriefing.dailylog</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>/Users/jaewooan/AIstocktrading/stock-briefing/scripts/run_daily_log.sh</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/jaewooan/AIstocktrading/stock-briefing</string>
+
+    <key>StartCalendarInterval</key>
+    <array>
+        <dict>
+            <key>Weekday</key><integer>1</integer>
+            <key>Hour</key><integer>16</integer>
+            <key>Minute</key><integer>0</integer>
+        </dict>
+        <dict>
+            <key>Weekday</key><integer>2</integer>
+            <key>Hour</key><integer>16</integer>
+            <key>Minute</key><integer>0</integer>
+        </dict>
+        <dict>
+            <key>Weekday</key><integer>3</integer>
+            <key>Hour</key><integer>16</integer>
+            <key>Minute</key><integer>0</integer>
+        </dict>
+        <dict>
+            <key>Weekday</key><integer>4</integer>
+            <key>Hour</key><integer>16</integer>
+            <key>Minute</key><integer>0</integer>
+        </dict>
+        <dict>
+            <key>Weekday</key><integer>5</integer>
+            <key>Hour</key><integer>16</integer>
+            <key>Minute</key><integer>0</integer>
+        </dict>
+        <dict>
+            <key>Weekday</key><integer>1</integer>
+            <key>Hour</key><integer>21</integer>
+            <key>Minute</key><integer>0</integer>
+        </dict>
+        <dict>
+            <key>Weekday</key><integer>2</integer>
+            <key>Hour</key><integer>21</integer>
+            <key>Minute</key><integer>0</integer>
+        </dict>
+        <dict>
+            <key>Weekday</key><integer>3</integer>
+            <key>Hour</key><integer>21</integer>
+            <key>Minute</key><integer>0</integer>
+        </dict>
+        <dict>
+            <key>Weekday</key><integer>4</integer>
+            <key>Hour</key><integer>21</integer>
+            <key>Minute</key><integer>0</integer>
+        </dict>
+        <dict>
+            <key>Weekday</key><integer>5</integer>
+            <key>Hour</key><integer>21</integer>
+            <key>Minute</key><integer>0</integer>
+        </dict>
+    </array>
+
+    <key>RunAtLoad</key>
+    <false/>
+
+    <key>StandardOutPath</key>
+    <string>/Users/jaewooan/AIstocktrading/stock-briefing/logs/launchd.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/jaewooan/AIstocktrading/stock-briefing/logs/launchd.log</string>
+</dict>
+</plist>

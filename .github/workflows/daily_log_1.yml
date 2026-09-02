@@ -1,64 +1,69 @@
+name: daily-log (수동 전용 · 예비 경로)
 
-name: daily-log
- 
+# 매일 자동 실행은 이 워크플로가 하지 않는다.
+#
+# 이유: pykrx 1.2.8+ 는 수급 데이터(외국인 순매수)에 KRX 로그인을 요구하는데,
+# GitHub 러너에서는 이게 통하지 않는다. 2026-08-21 이후 예약 실행이 8회 연속
+# "Run daily log" 단계에서 실패했고, 그동안 데이터가 하루도 쌓이지 않았다.
+# 실패가 매일 반복되면 알림이 무뎌져서 진짜 고장을 놓치게 되므로 예약을 뗐다.
+#
+# 지금의 일일 기록은 맥에서 launchd로 돈다(scripts/run_daily_log.sh).
+# 같은 코드가 맥에서는 정상 동작하는 것을 확인했다.
+#
+# 이 워크플로는 "러너에서도 되는지" 다시 확인하고 싶을 때 수동으로 돌린다.
+# 성공한다면 예약을 되살릴지 검토하면 된다.
+
 on:
-  schedule:
-    # KST 16:30 = UTC 07:30 (KRX closes 15:30 KST; allow settle time)
-    - cron: "30 7 * * 1-5"
   workflow_dispatch:
-  repository_dispatch:
-    types: [daily-log]
- 
+    inputs:
+      date:
+        description: "기록할 날짜 (YYYYMMDD, 비우면 오늘)"
+        required: false
+        default: ""
+
 permissions:
   contents: write
- 
+
 concurrency:
   group: daily-log
   cancel-in-progress: false
- 
+
 jobs:
   log:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
- 
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
+          # pykrx 1.2.8+ 는 3.10 이상을 요구한다.
           python-version: "3.11"
- 
+
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
- 
+
       - name: Run daily log
         env:
           KRX_ID: ${{ secrets.KRX_ID }}
           KRX_PW: ${{ secrets.KRX_PW }}
           NAVER_CLIENT_ID: ${{ secrets.NAVER_CLIENT_ID }}
           NAVER_CLIENT_SECRET: ${{ secrets.NAVER_CLIENT_SECRET }}
-        # daily_log.py exits non-zero when it produces nothing usable,
-        # so a KRX login / data failure now fails this step instead of
-        # going green. The step (and job) stops here on a bad exit code.
-        run: python daily_log.py
- 
-      - name: Show what was produced
-        run: |
-          echo "--- data directory ---"
-          ls -la data/ || echo "data/ does not exist"
- 
+        # daily_log.py는 쓸 데이터를 못 만들면 0이 아닌 코드로 끝난다.
+        # KRX 로그인/조회 실패가 조용히 초록불이 되지 않게 하기 위한 것이다.
+        run: python daily_log.py ${{ inputs.date }}
+
       - name: Verify output exists
-        # Belt-and-suspenders: fail loudly if the CSV somehow isn't there,
-        # even if the script above returned 0.
         run: |
           if [ ! -f data/predictions.csv ]; then
             echo "::error::data/predictions.csv is missing — nothing to commit"
             exit 1
           fi
           echo "predictions.csv present ($(wc -l < data/predictions.csv) lines)"
- 
+
       - name: Commit updated log
         run: |
           git config user.name  "github-actions[bot]"
@@ -70,4 +75,3 @@ jobs:
             git commit -m "chore: daily log $(date -u +'%Y-%m-%d')"
             git push
           fi
- 

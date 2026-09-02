@@ -3,8 +3,9 @@ name: daily-stock-briefing
 on:
   schedule:
     # GitHub Actions는 UTC 기준 → 한국 아침 7시 = UTC 22:00 (전날)
+    # cron은 하나만 둔다. 예전에 "0 22"와 "20 22" 두 개가 걸려 있어서
+    # 매일 아침 같은 브리핑이 20분 간격으로 두 번 발송됐다.
     - cron: "0 22 * * *"
-    - cron: "20 22 * * *"
   # Actions 탭에서 수동 실행(테스트)도 가능하게
   workflow_dispatch:
 

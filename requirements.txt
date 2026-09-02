@@ -1,2 +1,9 @@
-pykrx>=1.2.8
-requests
+# pykrx 1.2.8+ 는 KRX 로그인(KRX_ID/KRX_PW)을 요구하고 Python 3.10+ 를 필요로 한다.
+pykrx>=1.2.8,<2
+requests>=2.31,<3
+# pandas 는 daily_log.py / backfill.py / evaluate.py 가 직접 import 한다.
+# 예전에는 pykrx 의 전이 의존성에 얹혀 갔는데, 그러면 pykrx 가 의존성을 바꾸는
+# 순간 조용히 깨진다. 직접 쓰는 패키지는 직접 명시한다.
+pandas>=2.0,<3
+# .env 에서 KRX/네이버 자격증명을 읽는다 (로컬 실행용).
+python-dotenv>=1.0,<2

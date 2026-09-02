@@ -1,0 +1,16 @@
+{
+  "generated_at": "2026-08-18T22:42:00+09:00",
+  "source": "StockResearchMac backend (local FastAPI, /research/daily-snapshot)",
+  "backend_commit": "6753f1f",
+  "date_range": [
+    "20230101",
+    "20260817"
+  ],
+  "market": "KOSPI",
+  "top_n": 20,
+  "row_count": 720,
+  "trading_days_this_run": 36,
+  "skipped_days_this_run": 1289,
+  "trading_days_total_in_file": 36,
+  "note": "news_count는 과거 날짜에 대해 항상 비어 있습니다 — Naver 뉴스 검색 API가 최신 기사만 색인하고 과거 날짜 아카이브를 지원하지 않아, 실측으로 확인 후 역사적 조회를 채우지 않기로 했습니다."
+}

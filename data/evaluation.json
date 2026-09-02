@@ -1,0 +1,114 @@
+{
+  "generated_at": "2026-09-02T10:52:16+09:00",
+  "entry_rule": "T+1 시가 진입, T+h 종가 청산 (외국인 순매수는 T일 장 마감 후 확정되므로 T+1이 최초 실행 가능 시점)",
+  "benchmark": "KOSPI 지수, 동일 구간",
+  "signal_rows": 760,
+  "signal_days": 38,
+  "tickers": 140,
+  "tickers_without_price": 0,
+  "date_range": [
+    "2023-01-02",
+    "2026-09-01"
+  ],
+  "horizons": {
+    "1": {
+      "overall": {
+        "horizon": 1,
+        "n_positions": 760,
+        "n_signal_days": 38,
+        "mean_raw_return_pct": 0.052,
+        "mean_excess_pct": -0.158,
+        "median_excess_pct": -0.203,
+        "win_rate_pct": 44.2,
+        "mean_daily_excess_pct": -0.158,
+        "t_stat_on_daily_means": -1.77
+      },
+      "by_rank": [
+        {
+          "rank_bucket": "1-5",
+          "n": 190,
+          "mean_excess_pct": -0.033,
+          "win_rate_pct": 43.7
+        },
+        {
+          "rank_bucket": "6-10",
+          "n": 190,
+          "mean_excess_pct": -0.145,
+          "win_rate_pct": 44.2
+        },
+        {
+          "rank_bucket": "11-20",
+          "n": 380,
+          "mean_excess_pct": -0.228,
+          "win_rate_pct": 44.5
+        }
+      ]
+    },
+    "5": {
+      "overall": {
+        "horizon": 5,
+        "n_positions": 720,
+        "n_signal_days": 36,
+        "mean_raw_return_pct": 0.68,
+        "mean_excess_pct": -0.22,
+        "median_excess_pct": -0.595,
+        "win_rate_pct": 43.2,
+        "mean_daily_excess_pct": -0.22,
+        "t_stat_on_daily_means": -1.11
+      },
+      "by_rank": [
+        {
+          "rank_bucket": "1-5",
+          "n": 180,
+          "mean_excess_pct": -0.143,
+          "win_rate_pct": 43.9
+        },
+        {
+          "rank_bucket": "6-10",
+          "n": 180,
+          "mean_excess_pct": -0.28,
+          "win_rate_pct": 43.3
+        },
+        {
+          "rank_bucket": "11-20",
+          "n": 360,
+          "mean_excess_pct": -0.229,
+          "win_rate_pct": 42.8
+        }
+      ]
+    },
+    "20": {
+      "overall": {
+        "horizon": 20,
+        "n_positions": 720,
+        "n_signal_days": 36,
+        "mean_raw_return_pct": 1.337,
+        "mean_excess_pct": 0.216,
+        "median_excess_pct": -0.957,
+        "win_rate_pct": 46.0,
+        "mean_daily_excess_pct": 0.216,
+        "t_stat_on_daily_means": 0.53
+      },
+      "by_rank": [
+        {
+          "rank_bucket": "1-5",
+          "n": 180,
+          "mean_excess_pct": 0.063,
+          "win_rate_pct": 49.4
+        },
+        {
+          "rank_bucket": "6-10",
+          "n": 180,
+          "mean_excess_pct": -0.296,
+          "win_rate_pct": 42.8
+        },
+        {
+          "rank_bucket": "11-20",
+          "n": 360,
+          "mean_excess_pct": 0.549,
+          "win_rate_pct": 45.8
+        }
+      ]
+    }
+  }
+}
