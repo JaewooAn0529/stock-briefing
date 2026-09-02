@@ -30,4 +30,9 @@ jobs:
           NAVER_CLIENT_SECRET: ${{ secrets.NAVER_CLIENT_SECRET }}
           KAKAO_REST_API_KEY: ${{ secrets.KAKAO_REST_API_KEY }}
           KAKAO_REFRESH_TOKEN: ${{ secrets.KAKAO_REFRESH_TOKEN }}
+          # briefing.py는 예전부터 가족 발송(RECIPIENTS의 두 번째 항목)을
+          # 지원했지만, 이 값이 job에 전달되지 않아 실제로는 한 번도 발송된 적이
+          # 없다. 토큰이 없으면 조용히 건너뛰는 설계라 로그로도 드러나지 않았다.
+          # Secrets에 KAKAO_REFRESH_TOKEN_2를 등록하면 그때부터 함께 나간다.
+          KAKAO_REFRESH_TOKEN_2: ${{ secrets.KAKAO_REFRESH_TOKEN_2 }}
         run: python briefing.py

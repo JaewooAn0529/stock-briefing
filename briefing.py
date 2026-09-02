@@ -282,7 +282,11 @@ def main() -> int:
     for env_name, stock_names in RECIPIENTS.items():
         refresh = os.environ.get(env_name)
         if not refresh:
-            continue  # 토큰 없으면 조용히 스킵 (가족 미등록 상태에서도 안전)
+            # 미등록 수신자는 건너뛰되, 건너뛴 사실은 남긴다. 완전히 조용히
+            # 넘어가는 바람에 워크플로가 KAKAO_REFRESH_TOKEN_2를 job에 전달하지
+            # 않는다는 걸 아무도 눈치채지 못했고, 가족 발송이 계속 안 나갔다.
+            print(f"[skip] {env_name} 미설정 — {stock_names} 발송 건너뜀")
+            continue
         total += 1
         try:
             msgs, price_failures = build_messages_for(stock_names)
