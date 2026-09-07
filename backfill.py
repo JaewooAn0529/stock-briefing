@@ -61,20 +61,20 @@ def backend_commit() -> str | None:
 def fetch_day_with_retry(source: str, d: str, market: str, top_n: int) -> pd.DataFrame | None:
     """요청 제한이면 점점 길게 쉬며 재시도, 진짜 휴장일이면 None을 돌려준다.
 
+    재시도 자체는 snapshot이 담당한다(일시적 네트워크 끊김도 같이 처리된다).
+    다만 백필은 하루치 크론과 달리 수백 일을 연속으로 두드리므로 KRX 요청
+    제한에 걸리기 쉬워, 대기 시간을 훨씬 길게 잡는다.
+
     재시도를 다 소진하면 예외로 전체 실행을 멈춘다 — 여기서 조용히 None을
     반환해버리면 스키마상 "휴장일"과 구분이 안 돼서, 실은 데이터가 빠진 날인데
     완결된 것처럼 CSV에 남는다.
     """
-    for attempt, backoff in enumerate([0] + RETRY_BACKOFF_SEC[:MAX_RETRIES]):
-        if backoff:
-            print(f"    [retry {attempt}/{MAX_RETRIES}] {backoff}초 대기 후 재시도 ({d})", flush=True)
-            time.sleep(backoff)
-        try:
-            return snapshot.fetch_day(source, d, market, top_n)
-        except UpstreamFetchError as exc:
-            last = exc
-            continue
-    raise HardStop(f"{d}: {MAX_RETRIES}번 재시도해도 회복되지 않음 — {last}")
+    try:
+        return snapshot.fetch_day_with_retry(
+            source, d, market, top_n, backoffs=tuple(RETRY_BACKOFF_SEC[:MAX_RETRIES])
+        )
+    except UpstreamFetchError as exc:
+        raise HardStop(f"{d}: {MAX_RETRIES}번 재시도해도 회복되지 않음 — {exc}")
 
 
 def last_recorded_date(path: Path) -> datetime | None:

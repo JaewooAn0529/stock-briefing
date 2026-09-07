@@ -53,41 +53,90 @@ FORWARD_PAD_DAYS = 60
 # ---------------------------------------------------------------------------
 # 가격 데이터 수집 (종목당 1회 호출 + 디스크 캐시)
 # ---------------------------------------------------------------------------
-def fetch_ticker_ohlcv(stock_api, ticker: str, start: str, end: str, refresh: bool) -> pd.DataFrame | None:
+def _cache_meta_path() -> Path:
+    return CACHE_DIR / "_coverage.json"
+
+
+def _load_coverage() -> dict[str, list[str]]:
+    p = _cache_meta_path()
+    if not p.exists():
+        return {}
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def _save_coverage(cov: dict[str, list[str]]) -> None:
+    _cache_meta_path().write_text(json.dumps(cov, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _cached_if_covers(key: str, start: str, end: str, coverage: dict) -> pd.DataFrame | None:
+    """캐시가 요청 구간을 포함하면 그걸 쓴다.
+
+    예전에는 캐시 파일 이름에 start/end를 박아서, end가 "오늘"인 탓에 날짜만
+    바뀌어도 캐시가 통째로 무효화됐다. 하루 뒤에 다시 돌리면 140종목을 처음부터
+    다시 받는다. 구간을 따로 기록해두고 포함 관계로 판정한다.
+    """
+    have = coverage.get(key)
+    cache = CACHE_DIR / f"{key}.csv"
+    if not (have and cache.exists()):
+        return None
+    if have[0] > start or have[1] < end:
+        return None
+    df = pd.read_csv(cache, index_col=0, parse_dates=True)
+    if df.empty:
+        return None
+    mask = (df.index >= pd.Timestamp(start)) & (df.index <= pd.Timestamp(end))
+    return df[mask]
+
+
+def _clean_ohlcv(df: pd.DataFrame) -> pd.DataFrame:
+    df = df[["시가", "종가"]].rename(columns={"시가": "open", "종가": "close"})
+    # 거래정지일 등은 0으로 채워져 오는데, 그대로 두면 수익률이 -100%로 잡힌다.
+    return df[(df["open"] > 0) & (df["close"] > 0)]
+
+
+def fetch_ticker_ohlcv(
+    stock_api, ticker: str, start: str, end: str, refresh: bool, coverage: dict
+) -> pd.DataFrame | None:
     """종목 하나의 [start, end] OHLCV. 한 번 받으면 캐시해서 재실행은 호출 0회."""
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    cache = CACHE_DIR / f"{ticker}_{start}_{end}.csv"
 
-    if cache.exists() and not refresh:
-        df = pd.read_csv(cache, index_col=0, parse_dates=True)
-        return df if not df.empty else None
+    if not refresh:
+        cached = _cached_if_covers(ticker, start, end, coverage)
+        if cached is not None:
+            return cached if not cached.empty else None
 
     with snapshot.detect_upstream_errors():
         df = stock_api.get_market_ohlcv(start, end, ticker)
     if df is None or df.empty:
         return None
 
-    df = df[["시가", "종가"]].rename(columns={"시가": "open", "종가": "close"})
-    # 거래정지일 등은 0으로 채워져 오는데, 그대로 두면 수익률이 -100%로 잡힌다.
-    df = df[(df["open"] > 0) & (df["close"] > 0)]
-    df.to_csv(cache)
+    df = _clean_ohlcv(df)
+    df.to_csv(CACHE_DIR / f"{ticker}.csv")
+    coverage[ticker] = [start, end]
     return df if not df.empty else None
 
 
-def fetch_index_ohlcv(stock_api, start: str, end: str, refresh: bool) -> pd.DataFrame | None:
+def fetch_index_ohlcv(
+    stock_api, start: str, end: str, refresh: bool, coverage: dict
+) -> pd.DataFrame | None:
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    cache = CACHE_DIR / f"index_1001_{start}_{end}.csv"
-    if cache.exists() and not refresh:
-        df = pd.read_csv(cache, index_col=0, parse_dates=True)
-        return df if not df.empty else None
+    key = "index_1001"
+
+    if not refresh:
+        cached = _cached_if_covers(key, start, end, coverage)
+        if cached is not None:
+            return cached if not cached.empty else None
 
     with snapshot.detect_upstream_errors():
         df = stock_api.get_index_ohlcv(start, end, snapshot.INDEX_CODE["KOSPI"])
     if df is None or df.empty:
         return None
-    df = df[["시가", "종가"]].rename(columns={"시가": "open", "종가": "close"})
-    df = df[(df["open"] > 0) & (df["close"] > 0)]
-    df.to_csv(cache)
+    df = _clean_ohlcv(df)
+    df.to_csv(CACHE_DIR / f"{key}.csv")
+    coverage[key] = [start, end]
     return df
 
 
@@ -196,19 +245,30 @@ def main() -> int:
     print(f"[info] 가격 조회 구간 {start} ~ {end} (홀딩 최대 {max_h}거래일)")
 
     stock_api = snapshot.import_pykrx_stock()
+    coverage = _load_coverage()
 
-    print(f"[info] KOSPI 지수 조회...")
-    index_px = fetch_index_ohlcv(stock_api, start, end, args.refresh)
+    print("[info] KOSPI 지수 조회...")
+    index_px = fetch_index_ohlcv(stock_api, start, end, args.refresh, coverage)
     if index_px is None:
         print("[fatal] KOSPI 지수 데이터를 받지 못했습니다.")
         return 2
 
+    # 종목마다 필요한 구간은 다르다. 마지막 시그널이 2023년인 종목은 그 뒤로
+    # 몇 거래일치만 있으면 되고, 오늘 데이터를 받을 이유가 없다. 전 종목을
+    # 공통 구간(=오늘까지)으로 받으면 날짜가 하루 지날 때마다 캐시가 전부
+    # 무효화돼서 매번 140종목을 다시 받게 된다.
+    first_signal = signals.groupby("ticker")["date"].min()
+    last_signal = signals.groupby("ticker")["date"].max()
+
     prices: dict[str, pd.DataFrame] = {}
     misses = 0
+    fetched = 0
     for i, t in enumerate(tickers, 1):
-        cache_hit = (CACHE_DIR / f"{t}_{start}_{end}.csv").exists() and not args.refresh
+        t_start = first_signal[t].strftime("%Y%m%d")
+        t_end = min((last_signal[t] + timedelta(days=FORWARD_PAD_DAYS)).strftime("%Y%m%d"), today)
+        was_cached = _cached_if_covers(t, t_start, t_end, coverage) is not None and not args.refresh
         try:
-            df = fetch_ticker_ohlcv(stock_api, t, start, end, args.refresh)
+            df = fetch_ticker_ohlcv(stock_api, t, t_start, t_end, args.refresh, coverage)
         except UpstreamFetchError as exc:
             print(f"  [warn] {t} 조회 실패 — 건너뜁니다: {str(exc)[:120]}")
             df = None
@@ -216,10 +276,13 @@ def main() -> int:
             misses += 1
         else:
             prices[t] = df
-        if i % 25 == 0 or i == len(tickers):
-            print(f"  [progress] {i}/{len(tickers)} (미확보 {misses})", flush=True)
-        if not cache_hit:
+        if not was_cached:
+            fetched += 1
             time.sleep(args.delay)
+        if i % 25 == 0 or i == len(tickers):
+            print(f"  [progress] {i}/{len(tickers)} (신규조회 {fetched} · 미확보 {misses})", flush=True)
+
+    _save_coverage(coverage)
 
     if not prices:
         print("[fatal] 가격 데이터를 하나도 받지 못했습니다.")
@@ -290,7 +353,7 @@ def main() -> int:
     print("\n[해석 주의]")
     print(f"  · 시그널일이 {n_days}일뿐이라 t값은 참고치다. 통상 |t|>2 를 유의하다고 보지만,")
     print(f"    그 기준도 표본이 수십 일 이상 쌓였을 때 이야기다.")
-    print(f"  · t값은 (종목,날짜) 760여 행이 아니라 '날짜별 평균' {n_days}개로 계산했다.")
+    print(f"  · t값은 (종목,날짜) {len(signals)}행이 아니라 '날짜별 평균' {n_days}개로 계산했다.")
     print(f"    같은 날 20종목은 시장 충격을 공유해 독립 표본이 아니기 때문이다.")
     print(f"  · 수수료·세금·슬리피지·시가 체결 가정은 반영하지 않았다. 실제 성과는 이보다 낮다.")
     if misses:

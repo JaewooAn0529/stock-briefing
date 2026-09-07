@@ -25,6 +25,7 @@ import argparse
 import json
 import os
 import sys
+import time
 import urllib.parse
 import urllib.request
 from datetime import datetime
@@ -46,11 +47,56 @@ def today_kst() -> str:
     return datetime.now(KST).strftime("%Y%m%d")
 
 
+# 네이버 검색 API 한 페이지 최대치와, start 파라미터가 허용하는 상한.
+NAVER_DISPLAY = 100
+NAVER_MAX_START = 1000
+
+
+def _naver_news_page(name: str, start: int, client_id: str, client_secret: str) -> list[dict]:
+    """뉴스 검색 한 페이지. 일시적 오류는 짧게 한 번 재시도한다.
+
+    실제로 IncompleteRead로 한 종목 조회가 통째로 날아간 적이 있다
+    (2026-09-03 로그). 한 번만 다시 시도해도 대부분 넘어간다.
+    """
+    url = (
+        "https://openapi.naver.com/v1/search/news.json"
+        f"?query={urllib.parse.quote(name)}&display={NAVER_DISPLAY}&start={start}&sort=date"
+    )
+    for attempt in range(2):
+        try:
+            req = urllib.request.Request(url)
+            req.add_header("X-Naver-Client-Id", client_id)
+            req.add_header("X-Naver-Client-Secret", client_secret)
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                return json.loads(resp.read().decode("utf-8")).get("items", [])
+        except Exception:
+            if attempt == 1:
+                raise
+            time.sleep(1)
+    return []
+
+
+def _pub_date(item: dict):
+    pub = item.get("pubDate")
+    if not pub:
+        return None
+    try:
+        return datetime.strptime(pub, "%a, %d %b %Y %H:%M:%S %z").astimezone(KST).date()
+    except ValueError:
+        return None
+
+
 def fetch_news_counts(names: list[str], date: str) -> dict[str, int | None]:
     """종목별 당일 기사 수 (네이버 뉴스 API). 자격증명이 없으면 조용히 건너뛴다.
 
     과거 날짜에는 의미가 없다 — 네이버 검색 API가 최신 기사만 색인하고 과거
     아카이브를 지원하지 않기 때문이다. 그래서 당일 기록에서만 값이 찬다.
+
+    한 페이지(100건)만 받아서 세면 기사가 많은 종목은 전부 정확히 100이 된다.
+    실제로 기록된 39개 값 중 21개가 100이었다 — "100건"이 아니라 "100건 이상"인데
+    숫자로는 구분이 안 되니, 이 필드로 분석하면 인기 종목만 골라서 값이 눌린다.
+    sort=date라 오늘 기사가 앞쪽에 몰려 있으므로, 어제 기사가 나올 때까지만
+    페이지를 넘기면 정확한 개수를 얻는다(보통 1~2번, 많아야 10번).
     """
     client_id = os.environ.get("NAVER_CLIENT_ID")
     client_secret = os.environ.get("NAVER_CLIENT_SECRET")
@@ -59,33 +105,44 @@ def fetch_news_counts(names: list[str], date: str) -> dict[str, int | None]:
 
     target = datetime.strptime(date, "%Y%m%d").date()
     counts: dict[str, int | None] = {}
+
     for name in names:
         try:
-            url = (
-                "https://openapi.naver.com/v1/search/news.json"
-                f"?query={urllib.parse.quote(name)}&display=100&sort=date"
-            )
-            req = urllib.request.Request(url)
-            req.add_header("X-Naver-Client-Id", client_id)
-            req.add_header("X-Naver-Client-Secret", client_secret)
-            with urllib.request.urlopen(req, timeout=10) as resp:
-                payload = json.loads(resp.read().decode("utf-8"))
-
             same_day = 0
-            for item in payload.get("items", []):
-                pub = item.get("pubDate")
-                if not pub:
-                    continue
-                try:
-                    pub_date = datetime.strptime(pub, "%a, %d %b %Y %H:%M:%S %z").date()
-                except ValueError:
-                    continue
-                if pub_date == target:
-                    same_day += 1
+            start = 1
+            saturated = True
+            while start <= NAVER_MAX_START:
+                items = _naver_news_page(name, start, client_id, client_secret)
+                if not items:
+                    saturated = False
+                    break
+
+                older_seen = False
+                for item in items:
+                    pub_date = _pub_date(item)
+                    if pub_date is None:
+                        continue
+                    if pub_date == target:
+                        same_day += 1
+                    elif pub_date < target:
+                        # 날짜 내림차순이라 목표일보다 과거가 나오면 더 볼 필요가 없다.
+                        older_seen = True
+                        break
+
+                if older_seen or len(items) < NAVER_DISPLAY:
+                    saturated = False
+                    break
+                start += NAVER_DISPLAY
+
+            if saturated:
+                # API가 허용하는 끝(1000건)까지 갔는데도 전부 당일 기사였다.
+                # 드문 경우지만 이때의 값은 여전히 "이상"이라 로그로 남긴다.
+                print(f"[warn] {name}: 당일 기사가 {NAVER_MAX_START}건 이상 — 값이 상한에 걸렸습니다")
             counts[name] = same_day
         except Exception as exc:  # 뉴스 때문에 본 로그가 깨지면 안 된다
             print(f"[warn] {name} 뉴스 조회 실패: {exc}")
             counts[name] = None
+
     return counts
 
 
@@ -127,7 +184,7 @@ def main() -> int:
     print(f"[info] 거래일 {date} 기록 (source={args.source})")
 
     try:
-        rows = snapshot.fetch_day(args.source, date, args.market, args.top_n)
+        rows = snapshot.fetch_day_with_retry(args.source, date, args.market, args.top_n)
     except UpstreamFetchError as exc:
         print(f"[fatal] {date} 수급 데이터 조회 실패: {exc}")
         return EXIT_HARD_FAIL

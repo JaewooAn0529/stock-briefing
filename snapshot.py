@@ -34,6 +34,7 @@ import contextlib
 import io
 import os
 import sys
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -262,6 +263,62 @@ def fetch_day(source: str, date: str, market: str = "KOSPI", top_n: int | None =
 
 
 # ---------------------------------------------------------------------------
+# 재시도
+# ---------------------------------------------------------------------------
+# 네트워크가 순간적으로 끊겼을 때 나타나는 흔적들. 실제로 2026-09-03 21:00
+# 실행이 RemoteDisconnected 한 번으로 exit 2까지 갔다 — 몇 초 뒤면 멀쩡한
+# 상황인데 그날 기록을 통째로 날린 셈이다.
+_TRANSIENT_SIGNATURES = (
+    "RemoteDisconnected",
+    "Connection aborted",
+    "Connection reset",
+    "ConnectionError",
+    "IncompleteRead",
+    "timed out",
+    "Timeout",
+    "Temporary failure in name resolution",
+    "Max retries exceeded",
+)
+
+
+def is_transient_error(exc: BaseException) -> bool:
+    blob = f"{type(exc).__name__}: {exc}"
+    return any(sig in blob for sig in _TRANSIENT_SIGNATURES)
+
+
+class RetriesExhausted(UpstreamFetchError):
+    """재시도를 다 써도 회복되지 않음."""
+
+
+def fetch_day_with_retry(
+    source: str,
+    date: str,
+    market: str = "KOSPI",
+    top_n: int | None = 20,
+    backoffs: tuple[int, ...] = (5, 15, 45),
+) -> pd.DataFrame | None:
+    """일시적 실패는 쉬었다 다시, 휴장일은 None, 진짜 고장은 예외.
+
+    "데이터 없음"(휴장일·공표 전)은 재시도해도 달라지지 않으므로 즉시 None을
+    돌려준다. 이걸 재시도에 섞으면 휴장일마다 쓸데없이 몇 분씩 잡아먹는다.
+    """
+    last: BaseException | None = None
+    for wait in (0,) + tuple(backoffs):
+        if wait:
+            print(f"[retry] {wait}초 후 재시도 ({date}) — 직전 오류: {str(last)[:120]}")
+            time.sleep(wait)
+        try:
+            return fetch_day(source, date, market, top_n)
+        except UpstreamFetchError as exc:
+            last = exc
+        except Exception as exc:
+            if not is_transient_error(exc):
+                raise
+            last = exc
+    raise RetriesExhausted(f"{date}: {len(backoffs)}회 재시도해도 실패 — {last}")
+
+
+# ---------------------------------------------------------------------------
 # 거래일 탐색 / 저장
 # ---------------------------------------------------------------------------
 def resolve_trading_day(source: str, start: str, market: str = "KOSPI", lookback: int = 10) -> str | None:
@@ -278,7 +335,7 @@ def resolve_trading_day(source: str, start: str, market: str = "KOSPI", lookback
     cursor = datetime.strptime(start, "%Y%m%d")
     for _ in range(lookback):
         candidate = cursor.strftime("%Y%m%d")
-        df = fetch_day(source, candidate, market, top_n=1)
+        df = fetch_day_with_retry(source, candidate, market, top_n=1)
         if df is not None and not df.empty:
             if candidate != start:
                 print(f"[info] {start}은 데이터가 없어 {candidate}을 사용합니다")
@@ -297,31 +354,87 @@ def _content_signature(df: pd.DataFrame) -> pd.Series:
     return df[cols].fillna("").astype(str).agg("|".join, axis=1)
 
 
+def _normalize_date(value) -> str:
+    """과거에 daily_log.py가 YYYYMMDD로 쓴 행이 남아 있을 수 있어 ISO로 맞춘다."""
+    if isinstance(value, str) and len(value) == 8 and value.isdigit():
+        return to_iso(value)
+    return value
+
+
+def validate_log(df: pd.DataFrame) -> list[str]:
+    """CSV가 지켜야 할 불변식을 검사한다.
+
+    하루치 스냅샷은 "그날 상위 N종목"이므로, 한 날짜 안에서 rank는 중복 없이
+    1..N이어야 하고 같은 종목이 두 번 나올 수 없다. 이게 깨지면 evaluate.py의
+    순위별 집계가 조용히 어긋난다 — 실제로 2026-09-02에 rank 20이 두 개 생겨
+    41일치 분석에 유령 행이 섞였다. 그래서 쓰기 경로마다 검사한다.
+    """
+    problems: list[str] = []
+
+    dupes = df[df.duplicated(subset=["date", "ticker"], keep=False)]
+    if not dupes.empty:
+        for d in sorted(dupes["date"].unique()):
+            problems.append(f"{d}: 같은 종목이 중복 기록됨")
+
+    for d, group in df.groupby("date"):
+        ranks = sorted(group["rank"].tolist())
+        if ranks != list(range(1, len(group) + 1)):
+            problems.append(
+                f"{d}: rank가 1..{len(group)} 연속이 아님 "
+                f"({len(group)}행, 중복 {len(ranks) - len(set(ranks))}개)"
+            )
+
+    return problems
+
+
 def append_idempotent(new_rows: pd.DataFrame, path: Path = OUT_PATH) -> pd.DataFrame:
-    """(date, ticker) 기준으로 덮어쓰며 append. 크래시로 파일이 깨지지 않게 원자적으로 쓴다."""
+    """날짜 단위로 통째 교체하며 append. 크래시로 파일이 깨지지 않게 원자적으로 쓴다.
+
+    종목 단위가 아니라 **날짜 단위로 교체**하는 게 핵심이다. 예전에는 (date,
+    ticker)로 중복 제거해서 병합했는데, KRX가 장 마감 직후의 잠정 수급을 나중에
+    확정치로 바꾸면 상위 N에서 밀려난 종목의 행이 그대로 남았다. 실제로
+    2026-09-02은 17:00 실행이 HD현대중공업을 20위로 기록했고 22:00 확정치에서는
+    한화가 20위였는데, 둘 다 남아 21행 · rank 20이 두 개가 됐다.
+
+    하루치 스냅샷은 "그날의 상위 N" 이라는 하나의 관측이므로 부분 병합이
+    성립하지 않는다 — 다시 기록하면 그 날짜는 통째로 새 관측으로 갈아끼운다.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
+
+    new_rows = new_rows.copy()
+    new_rows["date"] = new_rows["date"].map(_normalize_date)
 
     if path.exists():
         existing = pd.read_csv(path, dtype={"date": str, "ticker": str})
-        # 과거에 daily_log.py가 YYYYMMDD로 쓴 행이 남아 있을 수 있다 — 합치기
-        # 전에 ISO로 정규화해야 중복 제거 키가 실제로 맞아떨어진다.
-        existing["date"] = existing["date"].map(
-            lambda s: to_iso(s) if isinstance(s, str) and len(s) == 8 and s.isdigit() else s
-        )
-        # 내용이 똑같은 행은 새로 쓰지 않는다. logged_at만 갱신하면 파일은
-        # 매번 바뀌고, launchd가 하루 두 번 도는 탓에 "20 insertions, 20
-        # deletions"짜리 의미 없는 커밋이 매일 쌓인다. 진짜 데이터가 바뀐
-        # 날만 diff에 남아야 나중에 이력을 읽을 수 있다.
-        unchanged = _content_signature(existing)
-        keep_mask = ~_content_signature(new_rows).isin(set(unchanged))
-        new_rows = new_rows[keep_mask]
+        existing["date"] = existing["date"].map(_normalize_date)
 
-        combined = pd.concat([existing, new_rows], ignore_index=True)
-        combined = combined.drop_duplicates(subset=["date", "ticker"], keep="last")
+        # 내용이 완전히 같은 날짜는 손대지 않는다. logged_at만 갱신하면 파일이
+        # 매번 바뀌고, launchd가 하루 두 번 도는 탓에 의미 없는 커밋이 매일
+        # 쌓인다. 진짜 데이터가 바뀐 날만 diff에 남아야 이력을 읽을 수 있다.
+        replace_dates = []
+        for d, new_slice in new_rows.groupby("date"):
+            old_slice = existing[existing["date"] == d]
+            if set(_content_signature(old_slice)) != set(_content_signature(new_slice)):
+                replace_dates.append(d)
+
+        existing = existing[~existing["date"].isin(replace_dates)]
+        new_rows = new_rows[new_rows["date"].isin(replace_dates)]
+        # news_count는 값이 있는 날과 통째로 비어 있는 날이 섞인다(과거 날짜는
+        # 네이버가 색인하지 않아 항상 비어 있다). 한쪽 프레임이 전부 NA면 pandas가
+        # dtype 추론이 바뀔 것이라고 FutureWarning을 낸다 — 양쪽을 같은 nullable
+        # 정수형으로 맞춰두면 경고도, 나중에 바뀔 동작도 없다.
+        for frame in (existing, new_rows):
+            frame["news_count"] = pd.to_numeric(frame["news_count"], errors="coerce").astype("Int64")
+
+        frames = [f for f in (existing, new_rows) if not f.empty]
+        combined = pd.concat(frames, ignore_index=True) if frames else existing
     else:
         combined = new_rows
 
     combined = combined.sort_values(["date", "rank"]).reset_index(drop=True)
+
+    for problem in validate_log(combined):
+        print(f"[warn] 데이터 불변식 위반 — {problem}")
 
     tmp = path.with_suffix(".csv.tmp")
     combined.to_csv(tmp, index=False, encoding="utf-8-sig")
