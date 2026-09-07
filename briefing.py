@@ -22,6 +22,10 @@ WEEKDAY_KR = ["월", "화", "수", "목", "금", "토", "일"]
 # 카카오 text 템플릿의 text 필드 상한. 넘으면 API가 거절한다.
 KAKAO_TEXT_LIMIT = 200
 
+# refresh token 잔여가 이 일수 이하로 떨어지면 경고로 승격한다.
+# 재발급은 브라우저 로그인이 필요해서 사람이 시간을 내야 하므로 여유를 둔다.
+EXPIRY_WARN_DAYS = 14
+
 # 종목 마스터 목록 (이름, 티커)
 STOCKS = {
     "삼성전자": "005930",
@@ -175,6 +179,21 @@ def kakao_access_token(refresh_token: str, env_name: str) -> str:
     res.raise_for_status()
 
     payload = res.json()
+
+    # 남은 수명을 매번 남긴다. Secrets는 등록 후 다시 읽을 수 없어서, 이 로그가
+    # 아니면 "언제 만료되는지"를 알 방법이 없다 — 브리핑이 안 오고 나서야
+    # 알아채게 된다.
+    remaining = payload.get("refresh_token_expires_in")
+    if remaining:
+        days = remaining // 86400
+        if days <= EXPIRY_WARN_DAYS:
+            warn(
+                f"{env_name}: refresh token이 약 {days}일 뒤 만료됩니다. "
+                f"python get_kakao_token.py 로 재발급해 Secrets를 갱신하세요."
+            )
+        else:
+            print(f"[info] {env_name}: refresh token 잔여 약 {days}일")
+
     # 카카오는 refresh token의 남은 기간이 1개월 미만이면 응답에 새 refresh
     # token을 함께 준다. 이때 갱신해두지 않으면 결국 만료로 발송이 멈춘다.
     if payload.get("refresh_token"):

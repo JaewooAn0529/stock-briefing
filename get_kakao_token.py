@@ -22,6 +22,7 @@ KAKAO_REFRESH_TOKEN_2 에 넣는다.
 from __future__ import annotations
 
 import os
+import re
 import sys
 import urllib.parse
 import webbrowser
@@ -32,6 +33,41 @@ REDIRECT_URI = "https://localhost"
 AUTHORIZE_URL = "https://kauth.kakao.com/oauth/authorize"
 TOKEN_URL = "https://kauth.kakao.com/oauth/token"
 SCOPE = "talk_message"
+
+
+def extract_code(raw: str) -> str:
+    """붙여넣은 값에서 code만 뽑는다.
+
+    주소창을 통째로(https://localhost/?code=ABC), code=ABC 형태로, 혹은 값만
+    붙여넣는 세 경우를 모두 받는다. 예전 구현은 가운데 경우에서 "code=ABC"를
+    그대로 code로 넘겨 토큰 발급이 실패했다.
+    """
+    raw = raw.strip()
+    if not raw:
+        return ""
+    match = re.search(r"[?&]?code=([^&\s]+)", raw)
+    return match.group(1) if match else raw
+
+
+def verify_refresh_token(rest_api_key: str, refresh_token: str) -> dict | None:
+    """발급받은 refresh token이 실제로 쓸 수 있는지 즉시 확인한다.
+
+    refresh 호출은 토큰을 소모하지 않으므로 안전하게 검증할 수 있다. Secrets에
+    넣고 다음 날 아침 브리핑이 안 와서야 잘못된 걸 알게 되는 상황을 막는다.
+    """
+    res = requests.post(
+        TOKEN_URL,
+        data={
+            "grant_type": "refresh_token",
+            "client_id": rest_api_key,
+            "refresh_token": refresh_token,
+        },
+        timeout=10,
+    )
+    if res.status_code != 200:
+        print(f"[warn] 검증 실패 (HTTP {res.status_code}): {res.text[:200]}")
+        return None
+    return res.json()
 
 
 def main() -> int:
@@ -63,13 +99,11 @@ def main() -> int:
     except Exception:
         pass
 
-    code = input("3) code= 뒤의 값을 붙여넣으세요: ").strip()
+    raw = input("3) code= 뒤의 값을 붙여넣으세요 (주소창 전체를 붙여넣어도 됩니다): ").strip()
+    code = extract_code(raw)
     if not code:
         print("[fatal] code가 비었습니다.")
         return 1
-    # 주소창을 통째로 붙여넣는 실수가 잦아서 code만 뽑아준다.
-    if "code=" in code:
-        code = urllib.parse.parse_qs(urllib.parse.urlparse(code).query).get("code", [code])[0]
 
     res = requests.post(
         TOKEN_URL,
@@ -93,16 +127,34 @@ def main() -> int:
         print(f"[fatal] 응답에 refresh_token이 없습니다: {payload}")
         return 1
 
+    print("\n[검증] 발급받은 토큰이 실제로 동작하는지 확인합니다...")
+    checked = verify_refresh_token(rest_api_key, refresh_token)
+    if checked:
+        print("[검증] 정상 — 이 토큰으로 access token을 받을 수 있습니다.")
+        # 남은 기간이 1개월 미만이면 카카오가 여기서 새 refresh token을 준다.
+        # 그 경우 방금 받은 것보다 이쪽이 최신이므로 이걸 등록해야 한다.
+        if checked.get("refresh_token"):
+            refresh_token = checked["refresh_token"]
+            print("[검증] 카카오가 더 새로운 refresh token을 발급했습니다 — 아래 값이 그것입니다.")
+    else:
+        print("[검증] 확인에 실패했습니다. 아래 값을 등록하되, 등록 후 Actions에서 수동 실행으로 한 번 확인하세요.")
+
+    days = payload.get("refresh_token_expires_in", 0) // 86400
     print()
     print("=" * 66)
     print("발급 완료. 아래 값을 GitHub Secrets에 등록하세요.")
-    print("  저장소 → Settings → Secrets and variables → Actions")
+    print("  https://github.com/JaewooAn0529/stock-briefing/settings/secrets/actions")
     print("=" * 66)
     print(f"KAKAO_REFRESH_TOKEN = {refresh_token}")
     print("=" * 66)
-    print(f"(refresh token 유효기간: 약 {payload.get('refresh_token_expires_in', 0) // 86400}일)")
+    print(f"(refresh token 유효기간: 약 {days}일 — 다음 갱신 시점을 달력에 적어두세요)")
     print()
-    print("이 값은 카카오톡 발송 권한 그 자체입니다 — 커밋하거나 공유하지 마세요.")
+    print("주의:")
+    print("  · 이 값은 카카오톡 발송 권한 그 자체입니다 — 커밋하거나 공유하지 마세요.")
+    print("  · 방금 브라우저에서 로그인한 계정의 토큰입니다. 가족용")
+    print("    (KAKAO_REFRESH_TOKEN_2)을 발급하려면 시크릿 창에서 그 계정으로")
+    print("    로그인한 뒤 이 스크립트를 다시 실행하세요.")
+    print("  · 등록 후 Actions 탭 → daily-stock-briefing → Run workflow 로 확인하세요.")
     return 0
 
 
