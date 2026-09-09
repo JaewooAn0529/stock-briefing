@@ -31,6 +31,7 @@ ISO로 통일한다 — 기존 데이터를 손대지 않아도 된다.
 from __future__ import annotations
 
 import contextlib
+import fcntl
 import io
 import os
 import sys
@@ -387,7 +388,31 @@ def validate_log(df: pd.DataFrame) -> list[str]:
     return problems
 
 
+@contextlib.contextmanager
+def _write_lock(path: Path):
+    """CSV를 갱신하는 동안 다른 프로세스가 끼어들지 못하게 한다.
+
+    쓰는 쪽이 둘이다: launchd가 하루 두 번 도는 daily_log, 그리고 사람이 돌리는
+    backfill(3년치면 한두 시간 걸린다). append는 읽고-합치고-쓰는 과정이라,
+    두 프로세스가 겹치면 나중에 쓴 쪽이 상대의 갱신을 통째로 덮어쓴다.
+    파일 락으로 직렬화한다 — 원자적 교체(tmp -> replace)만으로는 이걸 못 막는다.
+    """
+    lock_path = path.with_suffix(".lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(lock_path, "w") as handle:
+        fcntl.flock(handle, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle, fcntl.LOCK_UN)
+
+
 def append_idempotent(new_rows: pd.DataFrame, path: Path = OUT_PATH) -> pd.DataFrame:
+    with _write_lock(path):
+        return _append_idempotent_locked(new_rows, path)
+
+
+def _append_idempotent_locked(new_rows: pd.DataFrame, path: Path = OUT_PATH) -> pd.DataFrame:
     """날짜 단위로 통째 교체하며 append. 크래시로 파일이 깨지지 않게 원자적으로 쓴다.
 
     종목 단위가 아니라 **날짜 단위로 교체**하는 게 핵심이다. 예전에는 (date,

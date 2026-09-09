@@ -41,6 +41,10 @@ REQUEST_DELAY_SEC = 1.5
 MAX_RETRIES = 4
 RETRY_BACKOFF_SEC = [30, 90, 180, 300]  # 요청 제한 시 점점 길게 쉰다
 
+# 몇 거래일마다 디스크에 흘려보낼지. 3년치 백필은 한두 시간이 걸려서, 끝까지
+# 메모리에 들고 있으면 중간에 죽는 순간 전부 잃는다.
+CHECKPOINT_EVERY = 25
+
 
 class HardStop(Exception):
     """재시도를 다 써도 회복 안 됨 — 나머지 날짜를 '휴장일'로 오기록하느니 멈춘다."""
@@ -77,15 +81,15 @@ def fetch_day_with_retry(source: str, d: str, market: str, top_n: int) -> pd.Dat
         raise HardStop(f"{d}: {MAX_RETRIES}번 재시도해도 회복되지 않음 — {exc}")
 
 
-def last_recorded_date(path: Path) -> datetime | None:
-    """CSV에 기록된 마지막 날짜. ISO/YYYYMMDD가 섞여 있어도 죽지 않는다."""
+def recorded_dates(path: Path) -> set:
+    """CSV에 이미 기록된 날짜 집합. ISO/YYYYMMDD가 섞여 있어도 죽지 않는다."""
     if not path.exists():
-        return None
+        return set()
     dates = pd.read_csv(path, usecols=["date"], dtype={"date": str})["date"].dropna()
     if dates.empty:
-        return None
+        return set()
     parsed = pd.to_datetime(dates.map(snapshot.to_compact), format="%Y%m%d", errors="coerce").dropna()
-    return None if parsed.empty else parsed.max().to_pydatetime()
+    return set(parsed.dt.date)
 
 
 def main() -> int:
@@ -119,30 +123,49 @@ def main() -> int:
     start = datetime.strptime(args.start, "%Y%m%d").date()
     end = datetime.strptime(args.end, "%Y%m%d").date()
 
-    # 중간에 멈췄던 적이 있으면 이미 확보한 날짜는 건너뛰고 이어받는다 —
-    # idempotent append라 다시 받아도 안전은 하지만, 굳이 KRX를 또 두드릴 이유가 없다.
-    if not args.no_resume:
-        last = last_recorded_date(OUT_PATH)
-        if last is not None and last.date() >= start:
-            print(f"[info] 기존 데이터가 {last.date()}까지 있어 그 다음날부터 이어받습니다 (--no-resume으로 끄기 가능)")
-            start = last.date() + timedelta(days=1)
-
-    if start > end:
-        print(f"[info] 받을 구간이 없습니다 ({start} > {end}). 이미 최신입니다.")
-        return 0
+    # 이미 확보한 날짜는 건너뛴다 — idempotent append라 다시 받아도 안전은
+    # 하지만, 굳이 KRX를 또 두드릴 이유가 없다.
+    #
+    # 예전에는 "기록된 최대 날짜 다음날부터"로 이어받았는데, 그러면 데이터가
+    # 앞에서부터 빈틈없이 채워진다는 가정이 깔린다. 실제로는 2023-02에서 한 번
+    # 끊긴 뒤 launchd가 2026-08부터 오늘치를 기록하기 시작해서, 가운데가 3년 반
+    # 비어 있는데도 최대 날짜는 "오늘"이었다. 그 결과 백필이 "받을 구간이 없다"며
+    # 아무것도 하지 않고 끝났다 — 구멍을 영영 못 채우는 상태였다.
+    # 날짜 집합으로 판정하면 구간이 어떻게 흩어져 있든 빠진 날만 받는다.
+    already = set() if args.no_resume else recorded_dates(OUT_PATH)
+    if already:
+        in_range = sum(1 for d in already if start <= d <= end)
+        print(f"[info] 이미 확보한 날짜 {in_range}일은 건너뜁니다 (--no-resume으로 끄기 가능)")
 
     all_rows: list[pd.DataFrame] = []
-    trading_days = skipped_days = 0
+    pending: list[pd.DataFrame] = []
+    trading_days = skipped_days = cached_days = 0
     stopped_early_at: str | None = None
     d = start
     try:
         while d <= end:
+            if d in already:
+                cached_days += 1
+                d += timedelta(days=1)
+                continue
+
             df = fetch_day_with_retry(args.source, d.strftime("%Y%m%d"), args.market, args.top_n)
             if df is not None and not df.empty:
                 all_rows.append(df)
+                pending.append(df)
                 trading_days += 1
             else:
                 skipped_days += 1
+
+            # 3년치를 받으면 한두 시간이 걸린다. 끝까지 메모리에 들고 있다가
+            # 마지막에 한 번 쓰면, 도중에 프로세스가 죽는 순간 전부 날아간다
+            # (예전 백필이 실제로 중간에 멈췄던 전력이 있다). 주기적으로
+            # 흘려보내면 최악의 경우에도 CHECKPOINT_EVERY 거래일치만 잃는다.
+            if len(pending) >= CHECKPOINT_EVERY:
+                snapshot.append_idempotent(pd.concat(pending, ignore_index=True), OUT_PATH)
+                print(f"[checkpoint] {d} 까지 저장 · 거래일 {trading_days}", flush=True)
+                pending = []
+
             if (trading_days + skipped_days) % 100 == 0:
                 print(f"[progress] {d} 까지 · 거래일 {trading_days} · 휴장/주말 {skipped_days}", flush=True)
             time.sleep(args.delay)
@@ -151,17 +174,22 @@ def main() -> int:
         stopped_early_at = d.strftime("%Y%m%d")
         print(f"[stopped] {exc}")
         print(f"[stopped] 여기까지({stopped_early_at} 이전) 확보한 데이터는 저장하고 멈춥니다.")
-        print(f"[stopped] 회복되면 같은 명령을 다시 실행하세요 — 자동으로 이어받습니다.")
+        print("[stopped] 회복되면 같은 명령을 다시 실행하세요 — 빠진 날짜만 자동으로 이어받습니다.")
     except KeyboardInterrupt:
         stopped_early_at = d.strftime("%Y%m%d")
         print(f"\n[stopped] 사용자 중단 — {stopped_early_at} 이전까지 저장하고 멈춥니다.")
 
+    if pending:
+        snapshot.append_idempotent(pd.concat(pending, ignore_index=True), OUT_PATH)
+
     if not all_rows:
+        if cached_days:
+            print(f"[done] 요청 구간이 이미 모두 확보돼 있습니다 ({cached_days}일). 받을 것이 없습니다.")
+            return 0
         print("[warn] 수집된 데이터가 없습니다.")
         return 1
 
-    new_rows = pd.concat(all_rows, ignore_index=True)
-    combined = snapshot.append_idempotent(new_rows, OUT_PATH)
+    combined = pd.read_csv(OUT_PATH, dtype={"date": str, "ticker": str})
 
     meta = {
         "generated_at": datetime.now(KST).isoformat(timespec="seconds"),

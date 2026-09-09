@@ -7,6 +7,7 @@ venv/
 
 # 로컬 실행 산출물
 data/*.csv.tmp
+data/*.lock
 logs/
 .cache/
 # evaluate.py가 받아둔 가격 캐시 — 언제든 다시 받을 수 있는 파생 데이터다.
