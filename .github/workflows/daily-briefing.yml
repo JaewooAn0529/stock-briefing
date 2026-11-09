@@ -5,34 +5,92 @@ on:
     # GitHub Actions는 UTC 기준 → 한국 아침 7시 = UTC 22:00 (전날)
     # cron은 하나만 둔다. 예전에 "0 22"와 "20 22" 두 개가 걸려 있어서
     # 매일 아침 같은 브리핑이 20분 간격으로 두 번 발송됐다.
+    # 참고: GitHub 예약 실행은 몇 시간씩 밀리는 일이 잦다(실제 01~03 UTC 실행).
+    # 그래서 외부에서 22:00 UTC에 workflow_dispatch 로도 깨우고, 이 예약은
+    # 그 호출이 실패했을 때의 예비 경로로 남긴다. 중복 발송은 아래 guard가 막는다.
     - cron: "0 22 * * *"
   # Actions 탭에서 수동 실행(테스트)도 가능하게
   workflow_dispatch:
+    inputs:
+      force:
+        description: "오늘 이미 보냈어도 다시 보내기"
+        type: boolean
+        required: false
+        default: false
+  # TEMP-VERIFY: 토큰 복구 직후 검증용. 확인되면 제거한다.
+  push:
+    branches: [main]
+    paths: [".github/workflows/daily-briefing.yml"]
+
+permissions:
+  contents: write   # 갱신된 카카오 토큰(data/kakao_tokens.enc) 커밋
+  actions: read     # 오늘 이미 성공한 실행이 있는지 확인
+
+concurrency:
+  group: daily-briefing
+  cancel-in-progress: false
 
 jobs:
   send:
     runs-on: ubuntu-latest
     steps:
+      - name: Skip if already sent today (KST)
+        id: guard
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FORCE: ${{ inputs.force }}
+        run: |
+          if [ "$FORCE" = "true" ]; then echo "skip=false" >> "$GITHUB_OUTPUT"; exit 0; fi
+          start=$(date -u -d "$(TZ=Asia/Seoul date +%F)T00:00:00+09:00" +%Y-%m-%dT%H:%M:%SZ)
+          n=$(gh run list -R "$GITHUB_REPOSITORY" --workflow daily-briefing.yml \
+                --status success --created ">=$start" --json databaseId --jq length 2>/dev/null || echo 0)
+          echo "successful runs since $start (KST midnight): $n"
+          if [ "${n:-0}" -gt 0 ]; then
+            echo "::notice::오늘(KST) 이미 브리핑을 보냈습니다. 중복 발송을 건너뜁니다."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Checkout
-        uses: actions/checkout@v4
+        if: steps.guard.outputs.skip != 'true'
+        uses: actions/checkout@v5
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        if: steps.guard.outputs.skip != 'true'
+        uses: actions/setup-python@v6
         with:
           python-version: "3.12"
 
       - name: Install dependencies
+        if: steps.guard.outputs.skip != 'true'
         run: pip install -r requirements.txt
 
       - name: Send briefing
+        if: steps.guard.outputs.skip != 'true'
         env:
           NAVER_CLIENT_ID: ${{ secrets.NAVER_CLIENT_ID }}
           NAVER_CLIENT_SECRET: ${{ secrets.NAVER_CLIENT_SECRET }}
           KAKAO_REST_API_KEY: ${{ secrets.KAKAO_REST_API_KEY }}
+          # refresh token은 data/kakao_tokens.enc(자동 갱신)를 먼저 쓰고,
+          # 그게 죽어 있으면 아래 Secrets 값을 쓴다.
           KAKAO_REFRESH_TOKEN: ${{ secrets.KAKAO_REFRESH_TOKEN }}
-          # briefing.py는 예전부터 가족 발송(RECIPIENTS의 두 번째 항목)을
-          # 지원했지만, 이 값이 job에 전달되지 않아 실제로는 한 번도 발송된 적이
-          # 없다. 토큰이 없으면 조용히 건너뛰는 설계라 로그로도 드러나지 않았다.
-          # Secrets에 KAKAO_REFRESH_TOKEN_2를 등록하면 그때부터 함께 나간다.
           KAKAO_REFRESH_TOKEN_2: ${{ secrets.KAKAO_REFRESH_TOKEN_2 }}
         run: python briefing.py
+
+      - name: Commit rotated Kakao token
+        # 발송이 실패했더라도 토큰이 갱신됐다면 저장해야 다음 날 살아난다.
+        if: always() && steps.guard.outputs.skip != 'true'
+        run: |
+          if [ -z "$(git status --porcelain data/kakao_tokens.enc)" ]; then
+            echo "토큰 변경 없음"; exit 0
+          fi
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data/kakao_tokens.enc
+          git commit -m "chore: rotate kakao refresh token [skip ci]"
+          for i in 1 2 3; do
+            git pull --rebase origin main && git push && exit 0
+            sleep 5
+          done
+          echo "::error::갱신된 토큰을 push하지 못했습니다."; exit 1

@@ -147,5 +147,7 @@ git remote set-url origin git@github.com:JaewooAn0529/stock-briefing.git
 
 - **브리핑 시각**: GitHub Actions는 UTC 기준이라 `cron: "0 22 * * *"` = 한국 아침 7시. 부하에 따라 몇 분~수십 분 지연될 수 있다(무료 서비스 특성).
 - **refresh token 만료**: 약 2개월. 만료되면 `briefing.py`가 워크플로를 실패로 만들고 무엇을 해야 하는지 로그에 남긴다. 만료가 임박해 카카오가 새 토큰을 내려주면 경고로 알려준다.
+  - 2026-11-09부터: refresh token은 `data/kakao_tokens.enc`에 암호화해 두고(`token_store.py`, 키는 `KAKAO_REST_API_KEY`에서 유도), 카카오가 새 토큰을 내려주면 워크플로가 자동으로 갱신·커밋한다. 매일 돌기만 하면 만료되지 않는다. 그래도 끊기면 `python get_kakao_token.py`로 새로 받은 뒤 `KAKAO_REST_API_KEY=... python token_store.py set KAKAO_REFRESH_TOKEN <토큰>` 후 커밋하면 된다(Secrets 갱신도 계속 동작한다).
+  - 중복 발송 방지: 오늘(KST) 이미 성공한 실행이 있으면 이후 실행(예약/외부 호출)은 건너뛴다. 강제로 다시 보내려면 수동 실행에서 `force`를 켠다.
 - **주말/휴장일**: 브리핑은 장이 없던 날도 "최근 영업일 종가"로 발송된다. 수급 기록은 휴장일이면 아무것도 쓰지 않고 종료 코드 1로 끝난다.
 - **맥의 타임존**: 현재 이 맥은 UTC+8이라 KST보다 1시간 느리다. launchd 예약은 로컬 시각 기준이라 이 차이를 감안해 걸려 있고, 스크립트 자체는 한국 기준으로 마지막 거래일을 찾으므로 타임존이 바뀌어도 잘못된 날을 기록하지 않는다.

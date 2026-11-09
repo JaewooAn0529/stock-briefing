@@ -47,7 +47,9 @@ cd "$REPO" || exit 2
     echo "[ok] 커밋 완료"
 
     # 푸시는 자격증명이 있을 때만. 없다고 해서 로컬 기록까지 실패시키지 않는다.
-    if git push origin main 2>&1; then
+    # 워크플로가 갱신된 카카오 토큰(data/kakao_tokens.enc)을 커밋하므로
+    # 원격이 앞서 있을 수 있다. 먼저 당겨 와야 push가 거절되지 않는다.
+    if git pull --rebase --autostash origin main 2>&1 && git push origin main 2>&1; then
       echo "[ok] 푸시 완료"
     else
       echo "[warn] 푸시 실패 — 로컬 커밋은 남아 있습니다."

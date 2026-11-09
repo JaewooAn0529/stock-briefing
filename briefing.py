@@ -14,6 +14,8 @@ from email.utils import parsedate_to_datetime
 
 import requests
 
+import token_store
+
 KST = timezone(timedelta(hours=9))
 NOW = datetime.now(KST)
 TODAY = NOW.date()
@@ -174,6 +176,7 @@ def kakao_access_token(refresh_token: str, env_name: str) -> str:
         raise TokenExpired(
             f"{env_name} 이 만료/무효입니다(HTTP 400). "
             f"python get_kakao_token.py 를 다시 실행해 새 refresh token을 발급하고 "
+            f"python token_store.py set {env_name} <토큰> 으로 등록해 커밋하거나 "
             f"GitHub Secrets의 {env_name} 를 갱신하세요. 응답: {res.text[:200]}"
         )
     res.raise_for_status()
@@ -195,14 +198,37 @@ def kakao_access_token(refresh_token: str, env_name: str) -> str:
             print(f"[info] {env_name}: refresh token 잔여 약 {days}일")
 
     # 카카오는 refresh token의 남은 기간이 1개월 미만이면 응답에 새 refresh
-    # token을 함께 준다. 이때 갱신해두지 않으면 결국 만료로 발송이 멈춘다.
+    # token을 함께 준다. 예전에는 경고만 찍고 버려서 결국 만료로 발송이 멈췄다
+    # (2026-09-08 ~ 11-09). 이제는 암호화 저장소에 바로 써 두고 워크플로가
+    # 커밋한다 — 매일 돌기만 하면 토큰이 끊기지 않는다.
     if payload.get("refresh_token"):
-        warn(
-            f"{env_name}: 카카오가 새 refresh token을 발급했습니다(기존 토큰 만료 임박). "
-            f"GitHub Secrets의 {env_name} 를 새 값으로 갱신하세요. "
-            f"새 토큰은 보안상 로그에 남기지 않으니, 로컬에서 get_kakao_token.py 로 재발급받으면 됩니다."
-        )
+        token_store.save(env_name, KAKAO_KEY, payload["refresh_token"])
+        print(f"[info] {env_name}: 카카오가 새 refresh token을 발급해 저장소에 갱신했습니다.")
     return payload["access_token"]
+
+
+def access_token_for(env_name: str) -> str:
+    """저장소(자동 갱신본) → Secrets 순서로 refresh token을 시도한다.
+
+    둘 중 살아 있는 쪽을 쓰고, Secrets 쪽이 살아 있으면 저장소에도 옮겨 둔다.
+    (Secrets를 새로 등록했는데 저장소의 옛 토큰이 죽어 있는 경우도 처리된다.)
+    """
+    stored = token_store.load(env_name, KAKAO_KEY)
+    from_env = os.environ.get(env_name)
+    last_exc = None
+    for source, refresh in (("store", stored), ("secrets", from_env)):
+        if not refresh:
+            continue
+        try:
+            token = kakao_access_token(refresh, env_name)
+        except TokenExpired as exc:
+            print(f"[info] {env_name}: {source} 토큰 만료/무효")
+            last_exc = exc
+            continue
+        if source == "secrets" and refresh != stored:
+            token_store.save(env_name, KAKAO_KEY, refresh)
+        return token
+    raise last_exc or TokenExpired(f"{env_name}: 사용할 refresh token이 없습니다.")
 
 
 def split_for_kakao(text: str) -> list[str]:
@@ -299,7 +325,7 @@ def main() -> int:
     hard_failures = []
 
     for env_name, stock_names in RECIPIENTS.items():
-        refresh = os.environ.get(env_name)
+        refresh = token_store.load(env_name, KAKAO_KEY) or os.environ.get(env_name)
         if not refresh:
             # 미등록 수신자는 건너뛰되, 건너뛴 사실은 남긴다. 완전히 조용히
             # 넘어가는 바람에 워크플로가 KAKAO_REFRESH_TOKEN_2를 job에 전달하지
@@ -309,7 +335,7 @@ def main() -> int:
         total += 1
         try:
             msgs, price_failures = build_messages_for(stock_names)
-            token = kakao_access_token(refresh, env_name)
+            token = access_token_for(env_name)
             for m in msgs:
                 send_kakao(m, token)
             ok += 1
