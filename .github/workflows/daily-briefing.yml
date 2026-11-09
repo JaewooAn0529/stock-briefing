@@ -17,10 +17,6 @@ on:
         type: boolean
         required: false
         default: false
-  # TEMP-VERIFY: 토큰 복구 직후 검증용. 확인되면 제거한다.
-  push:
-    branches: [main]
-    paths: [".github/workflows/daily-briefing.yml"]
 
 permissions:
   contents: write   # 갱신된 카카오 토큰(data/kakao_tokens.enc) 커밋
